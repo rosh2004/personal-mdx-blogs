@@ -1,3 +1,9 @@
+---
+title: 'How Node.js Handles Thousands of Connections on a Single Thread'
+date: '2024-04-20'
+tags: ['nodejs', 'javascript', 'backend']
+---
+
 # How Node.js Handles Thousands of Connections on a Single Thread
 
 Node.js runs JavaScript on one thread, yet it routinely handles tens of thousands of simultaneous connections. This is not magic. It is a carefully designed system built on operating system primitives that most developers never see. Understanding the full stack, from hardware interrupts to your callback function, changes how you think about server performance.

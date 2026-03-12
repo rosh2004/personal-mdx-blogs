@@ -1,0 +1,108 @@
+# Angular's Journey: From Zone.js to Signals
+
+Angular's change detection story is one of the most interesting architectural evolutions in frontend frameworks. It went from "check everything, all the time" to "know exactly what changed, update only that." Understanding this journey reveals fundamental concepts about how UI frameworks detect and respond to state changes.
+
+## The Core Problem Every Framework Solves
+
+When a variable changes in memory, the DOM does not magically update. Every framework needs a strategy to answer: "something changed, what do I re-render?"
+
+Different frameworks answer this differently. React re-runs component functions and diffs a virtual DOM. Vue uses reactive proxies that track which templates read which data. Svelte compiles away the problem entirely, injecting update calls at build time. Solid uses fine-grained signals where each piece of state knows its dependents.
+
+Angular's original answer was the most brute-force: just check everything. And the mechanism it used to trigger those checks was Zone.js.
+
+## Zone.js: Monkey-Patching the Browser
+
+Zone.js is a library that wraps every asynchronous browser API with its own code. `setTimeout`, `addEventListener`, `fetch`, `Promise.then`, `XMLHttpRequest`, all of them get monkey-patched. The patched version does the original work and then notifies Angular: "an async task just finished."
+
+NgZone is Angular's wrapper around Zone.js. When Zone.js reports a completed async task, NgZone calls `ApplicationRef.tick()`, which triggers change detection across the entire component tree.
+
+Here is the critical insight: Zone.js is completely blind to what your code did. It does not look at variables. It does not track assignments. It just sees "a setTimeout callback finished" and assumes something might have changed. Even a setTimeout that logs a message and changes nothing will trigger a full change detection cycle.
+
+```typescript
+constructor() {
+  setTimeout(() => {
+    console.log('I changed absolutely nothing');
+  }, 1000);
+  // Zone.js still triggers change detection after this
+}
+```
+
+## Default Change Detection: Check Every Component
+
+When `ApplicationRef.tick()` fires, Angular walks the entire component tree from root to leaves. For each component, it evaluates every template expression and compares the result to the previously stored value.
+
+Angular does not use a virtual DOM for this. Instead, it maintains a **flat array of previous binding values** for each component. If your template has three expressions, Angular stores three previous values. On each cycle, it evaluates the expressions, compares with `===`, and updates only the DOM nodes whose values actually differ.
+
+This means Angular's comparison is very fast per-component, but it happens for every component on every cycle regardless of whether anything changed. For a small app, this is negligible. For an app with hundreds of components, it adds up.
+
+## OnPush: An Opt-In Optimization
+
+OnPush change detection was the first major optimization. It changes the rule from "always check this component" to "only check this component if there's a reason to."
+
+A component with `changeDetection: ChangeDetectionStrategy.OnPush` gets checked only when one of these conditions is true: an `@Input` reference changed (not deep mutations, reference identity via `===`), an event handler bound in the template fires, an `AsyncPipe` emits a new value, or `markForCheck()` is called manually.
+
+If none of these conditions are met, Angular skips the component and all of its children entirely. It never enters the component to evaluate template expressions.
+
+This is where a common misconception arises. OnPush does not control whether change detection runs. It controls whether a specific component participates when change detection does run. The trigger (Zone.js detecting async completion) is unchanged. OnPush just adds a gate at each component.
+
+The trade-off is that you lose the freedom to mutate objects in place. If you push an item into an array without creating a new array reference, OnPush components watching that input will not detect the change. You must use immutable patterns: spread operators, `Array.concat`, or libraries like Immer.
+
+## Signals: The Paradigm Shift
+
+Angular Signals fundamentally change the detection model. Instead of "check everything because something happened somewhere," it becomes "each piece of state knows exactly who depends on it."
+
+A signal is a reactive primitive. When Angular renders a template that reads a signal via `count()`, the signal internally records that component's template as a consumer. Later, when you call `count.set(5)`, the signal notifies only its registered consumers.
+
+```typescript
+@Component({
+  template: `<p>{{ count() }}</p>`
+})
+export class CounterComponent {
+  count = signal(0);
+
+  increment() {
+    this.count.update(c => c + 1);
+    // Signal notifies Angular: "I changed, here are my dependents"
+    // Only this component's affected binding gets updated
+  }
+}
+```
+
+Computed signals build a dependency graph at runtime. If `fullName` is computed from `firstName` and `lastName`, changing `firstName` recomputes `fullName` and updates only the DOM node bound to it. Other signals and their bindings are completely untouched.
+
+```typescript
+firstName = signal('John');
+lastName = signal('Doe');
+orders = signal(5);
+
+fullName = computed(() => this.firstName() + ' ' + this.lastName());
+
+// Changing firstName triggers: firstName -> fullName -> <h1> DOM node
+// orders and everything bound to it: untouched
+```
+
+This is conceptually very close to how Solid.js works. Fine-grained reactivity where the state itself knows its dependents, rather than a framework-level sweep that checks everything.
+
+## Zoneless: Removing the Monkey-Patches
+
+With signals answering all three questions (what changed, who depends on it, when did it change), Zone.js becomes unnecessary. Zoneless Angular removes Zone.js entirely. No more monkey-patching of browser APIs. Clean `setTimeout`, clean `addEventListener`, clean `fetch`.
+
+In a fully zoneless app, plain variable assignments are invisible to Angular. If you write `this.message = 'Updated'` without signals, Angular will never know. The UI stays stale. You must use signals for any state that drives the template.
+
+This sounds restrictive, but it is the same constraint React imposes with `useState`. The industry has converged on the idea that explicit state declaration is worth the trade-off for precise, efficient updates.
+
+## The Migration Path
+
+Angular is handling the transition incrementally. Template event bindings like `(click)` still mark the component dirty automatically in zoneless mode, so plain properties work for user-triggered changes. What breaks is state that changes outside template events: timers, WebSocket messages, HTTP responses. These require signals.
+
+The practical migration path is: first add signals for async-driven state, gradually convert remaining plain properties, and finally remove Zone.js from the bundle once everything uses signals or template events.
+
+## The Bigger Picture
+
+Angular's evolution mirrors a broader industry trend. The spectrum of change detection precision runs from least precise to most precise:
+
+```
+Angular (Zone.js)  ->  React (virtual DOM diff)  ->  Vue (proxies)  ->  Svelte (compiler)  ->  Solid/Signals
+```
+
+Angular started at the far left and is now moving toward the far right. Each approach trades some developer freedom for better performance precision. Signals represent Angular's bet that fine-grained reactivity is the future, and the migration from Zone.js to signals is one of the most ambitious framework architecture shifts happening in frontend development today.

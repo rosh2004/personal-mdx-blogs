@@ -1,0 +1,98 @@
+# Every Way a Browser Talks to a Server (and to Other Browsers)
+
+Web applications need to move data between clients and servers in different patterns: request/response, server push, bidirectional streams, and peer-to-peer. Each communication method exists because it solves a specific problem that the previous methods could not. Understanding when to use which saves you from overengineering simple features and underengineering complex ones.
+
+## The Foundation: HTTP Request/Response
+
+The default web model. The client sends a request, the server sends a response, the connection effectively closes. This covers the vast majority of web interactions: loading pages, submitting forms, fetching API data.
+
+The Fetch API handles this in modern browsers. When your JavaScript calls `fetch()`, the actual network work happens on the browser's internal C++ threads, not on the JavaScript thread. The JS thread just registers the request and moves on. When the response arrives, it comes back through the event loop as a resolved Promise.
+
+HTTP request/response works perfectly when the client always initiates communication. The problem arises when the server needs to push data to the client without being asked.
+
+## Short Polling: The Brute Force Approach
+
+The simplest "real-time" solution. The client asks the server "anything new?" at regular intervals.
+
+```js
+setInterval(() => fetch('/api/updates'), 3000);
+```
+
+This works but wastes bandwidth and server resources. Most responses will be "no, nothing new." You also get delayed updates since you only learn about changes on the next poll interval. For a chat app polling every 3 seconds, messages can arrive up to 3 seconds late.
+
+## Long Polling: A Smarter Hack
+
+The client sends a request, but the server holds the connection open until it has something to send. Once data arrives, the server responds and the client immediately sends a new request.
+
+This eliminates wasted responses (the server only responds when there is data) and reduces latency (data arrives almost immediately). But it is still a hack built on top of request/response. Each "push" requires a full HTTP round-trip, and managing held connections adds server complexity.
+
+## Server-Sent Events (SSE): One-Way Streaming
+
+SSE is a surprisingly underused protocol. It is a standard HTTP connection that the server never closes, instead streaming data down it continuously.
+
+```js
+const sse = new EventSource('/api/stream');
+sse.onmessage = (event) => console.log(event.data);
+```
+
+The server sends text-based events over this open connection. The browser handles reconnection automatically if the connection drops. SSE works over regular HTTP, which means it generally passes through proxies and firewalls more reliably than WebSockets (though some proxies may buffer responses or time out long-lived connections). It is simpler to implement than WebSockets.
+
+The limitation is that SSE is one-directional: server to client only. For many real-time features (live dashboards, notification feeds, stock tickers), that is all you need. SSE is often the right choice where developers reflexively reach for WebSockets.
+
+## WebSockets: Bidirectional Communication
+
+WebSockets provide a persistent, full-duplex connection. Both client and server can send data at any time.
+
+The connection starts as an HTTP request with an `Upgrade` header. The server agrees to the upgrade, and the protocol switches from HTTP to WebSocket. From that point, both sides communicate through a lightweight frame-based protocol with much less overhead than HTTP headers on every message.
+
+```js
+const ws = new WebSocket('wss://server.com');
+ws.onmessage = (event) => console.log(event.data);
+ws.send('hello from client');
+```
+
+WebSockets are the right choice when you need truly bidirectional communication: chat applications, collaborative editing, multiplayer games, or any scenario where the client frequently sends data back to the server in real time.
+
+The trade-off is complexity. WebSockets require specific server infrastructure, do not work through some corporate proxies, need manual reconnection logic, and lack the built-in features HTTP gives you (caching, compression, authentication headers per request).
+
+## WebRTC: Peer-to-Peer, No Server in the Middle
+
+Every method discussed so far routes through a server. WebRTC lets browsers communicate directly with each other. This is how video calls, screen sharing, and peer-to-peer file transfer work in the browser.
+
+WebRTC uses UDP instead of TCP for media because real-time audio and video need low latency more than perfect delivery. A dropped video frame is better than a frozen stream waiting for retransmission.
+
+The connection process involves several layers. **ICE** (Interactive Connectivity Establishment) finds a network path between two peers. This is necessary because most devices sit behind routers with private IP addresses that are not directly reachable from the internet. **STUN** servers help peers discover their public-facing IP address and port. **TURN** servers act as relays when a direct connection is impossible (strict firewalls, symmetric NATs).
+
+Once connected, **DTLS** handles the encryption handshake (like TLS but for UDP). **SRTP** encrypts the actual media packets. **SCTP** handles data channels for non-media data.
+
+The important realization: WebRTC still needs a server for the initial signaling (exchanging connection details between peers). But once the connection is established, the data flows directly between browsers. The server is out of the loop.
+
+## Web Workers: Threading Within the Browser
+
+Web Workers are not a communication protocol, but they solve a related problem: the JavaScript main thread handles both logic and rendering, so CPU-heavy work freezes the UI.
+
+A Web Worker runs JavaScript in a separate OS-level thread. It communicates with the main thread through `postMessage` and `onmessage`. There is no shared memory by default; data is copied between threads (or transferred using Transferable objects).
+
+**Shared Workers** provide a single worker instance shared across multiple tabs of the same origin. All tabs communicate through the same worker, which is useful for coordinating state across tabs.
+
+**Service Workers** are the most architecturally significant. They sit between the browser and the network, intercepting every fetch request. A Service Worker decides whether to serve a response from cache or forward the request to the network. They persist even when tabs are closed, enabling push notifications and offline functionality.
+
+The Service Worker lifecycle has three phases: Install (cache assets), Activate (take control, clean old caches), and Fetch (intercept requests). Combined with a Web App Manifest and HTTPS, Service Workers enable Progressive Web Apps that behave like native applications.
+
+## Choosing the Right Tool
+
+The decision framework is straightforward once you understand what each method provides:
+
+Client initiates, server responds once: HTTP request/response with Fetch. This covers most API interactions.
+
+Server needs to push updates, client just listens: SSE. Simpler than WebSockets, built-in reconnection, works through proxies. Use this for live feeds, notifications, dashboards.
+
+Both sides send data frequently in real time: WebSockets. Chat, collaborative editing, multiplayer games.
+
+Browser-to-browser direct communication: WebRTC. Video calls, screen sharing, peer-to-peer file transfer.
+
+Heavy computation without freezing the UI: Web Workers. Image processing, file parsing, complex calculations.
+
+Offline support and background sync: Service Workers. Caching strategies, push notifications, PWA functionality.
+
+The common mistake is reaching for WebSockets when SSE would suffice, or building polling when the browser has native streaming support. Match the communication pattern to the actual data flow requirements, and the right choice usually becomes obvious.

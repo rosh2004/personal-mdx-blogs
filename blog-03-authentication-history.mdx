@@ -1,0 +1,92 @@
+# The Complete History of Web Authentication: From Passwords to Passkeys
+
+Authentication has evolved through distinct eras, each solving problems the previous approach created. Understanding this history gives you the context to make informed decisions about auth in your own systems, rather than just following tutorials blindly.
+
+## Era 0: No Authentication
+
+In the early 1990s, most websites were static HTML pages. Public information, no user accounts, no login. The problem emerged when people wanted personalized experiences: email inboxes, bank accounts, private data. The server needed to know who you are.
+
+## Era 1: Basic Authentication
+
+The simplest possible solution. The browser pops up a native dialog, you type a username and password, and the browser sends them with every single request as an HTTP header:
+
+```
+Authorization: Basic dXNlcjpwYXNzd29yZA==
+```
+
+That string is `user:password` encoded in Base64. Not encrypted. Just encoded. Anyone who intercepts the request can decode it instantly.
+
+The problems compound: credentials are sent on every request (maximizing exposure time), there is no way to "log out" because the browser keeps sending credentials automatically, and every application must handle raw passwords directly. Even over HTTPS, which encrypts traffic on the wire, the password appears in server memory, logs, and error reports on every request. The principle: minimize how often and how long secrets are exposed.
+
+## Era 2: Sessions
+
+Sessions solve the repeated-password problem. You send your credentials once to a login endpoint. The server verifies them, creates a session record (stored in memory or a database), and sends back a random session ID in a cookie. Every subsequent request includes only this meaningless ID, not your password.
+
+```
+POST /login  ->  Server creates session, returns Set-Cookie: sid=abc123
+GET /profile ->  Browser sends Cookie: sid=abc123, server looks up session
+```
+
+This was the standard for years and still powers many applications. But sessions introduced a scaling challenge: the server must store every active session somewhere. With millions of users, that is expensive. And if you run five servers behind a load balancer, they all need access to the same session store. If server A creates a session but server B handles the next request, server B does not recognize the user.
+
+Sessions are **stateful** by nature. The server must remember things.
+
+## Era 3: JWT (JSON Web Tokens)
+
+JWTs flip the model. Instead of the server remembering who you are, the server gives you a signed document that proves who you are. You carry it with you on every request.
+
+A JWT has three parts: a header (algorithm info), a payload (your user data, expiration time, permissions), and a signature. The server creates the signature by hashing the header and payload with a secret key. On subsequent requests, the server re-hashes the header and payload and checks if the signature matches.
+
+The payload is not encrypted. Anyone can decode it and read its contents. The signature only proves the data has not been tampered with. Never put sensitive information like passwords or credit card numbers in a JWT.
+
+The "Bearer" prefix in `Authorization: Bearer eyJhbG...` tells the server: whoever carries this token should be granted access. The implication is important. The server trusts anyone who holds the token. If someone steals your token, they can use it.
+
+JWTs solve the scaling problem elegantly. Any server can verify a JWT independently because it just needs the signing key. No shared session store required. But JWTs create a new problem: you cannot easily revoke them. With sessions, you delete the record and the user is logged out. With JWTs, the token remains valid until it expires. If an account is compromised, you cannot "kill" the token instantly.
+
+The practical mitigation is **short-lived access tokens** (15 minutes) paired with **refresh tokens** (7 days). When the access token expires, the client uses the refresh token to get a new one. To revoke access, you invalidate the refresh token, and the access token dies naturally within minutes.
+
+For storage, httpOnly cookies are preferred over localStorage. An httpOnly cookie cannot be accessed by JavaScript, which protects against XSS attacks stealing the token.
+
+## Era 4: OAuth 2.0 (Delegated Authorization)
+
+OAuth answers a different question. Instead of "prove who you are to my app," it asks: "can you prove you already have a Google account, and can you give my app limited access to your data?"
+
+The critical distinction: OAuth 2.0 is an **authorization** protocol, not an authentication protocol. It was designed to let apps access your data (like reading your Google Calendar) without knowing your Google password. The "Login with Google" flow is actually a side effect.
+
+The authorization code flow works in six steps. Your app redirects the user to Google's login page. The user authenticates with Google (your app never sees the password). Google redirects back to your app with an authorization code. Your server exchanges that code for an access token in a server-to-server call. Your server uses the access token to fetch user info from Google. Your app creates its own session or JWT for the user.
+
+That server-to-server exchange in step four is critical. The access token never passes through the browser, reducing the attack surface.
+
+## OIDC: Authentication on Top of OAuth
+
+OpenID Connect is not a separate protocol. It is an **extension layer** built on top of OAuth 2.0. OAuth handles authorization. OIDC adds authentication by introducing the **ID token**, a JWT that contains identity information (who the user is, their email, when they authenticated).
+
+The ID token is always a JWT. The access token might be a JWT or might be an opaque random string, depending on the provider. If opaque, the API must look it up server-side to determine permissions.
+
+In an interview, the clearest way to describe it: "OpenID Connect is an authentication layer built on top of OAuth 2.0. OAuth 2.0 handles authorization, and OIDC extends it to also handle authentication by adding the ID token."
+
+## SSO: One Login, Many Apps
+
+Single Sign-On is not a protocol. It is an **architectural pattern** implemented using protocols like OIDC or SAML.
+
+A central Identity Provider (IdP) manages authentication. When you open Slack, it redirects you to the IdP. You authenticate once. When you open Jira, it redirects to the same IdP, which recognizes your active session and immediately redirects you back without a login screen.
+
+Services like Auth0, Okta, and Azure AD are commercial IdP implementations. They handle the OAuth/OIDC flows, password management, MFA, and provider integrations so you do not have to build this infrastructure yourself.
+
+## Era 5: Passwordless
+
+Everything discussed so far still relies on passwords somewhere. Passwords are fundamentally flawed: people reuse them, they get phished, they get leaked in breaches.
+
+**Magic links** are the simplest passwordless approach. You enter your email, the server sends a one-time link with a short-lived token, you click it, and you are authenticated. The security assumption: if you can access that email inbox, you are that person. Effectively, it outsources authentication to the email provider.
+
+**Passkeys** are the most significant authentication advancement. They use the same public/private key cryptography that secures SSH connections.
+
+When you register, your device generates a key pair. The private key stays in secure hardware on your device. Only the public key goes to the server. When you log in, the server sends a random challenge. Your device signs it with the private key after biometric verification. The server verifies the signature with the stored public key.
+
+Nothing can be phished because there is no password to type. Nothing useful can be leaked because the server only stores public keys. The passkey is cryptographically bound to the real domain, so even a convincing fake site cannot capture anything usable.
+
+## The Thread Through It All
+
+Each era addresses a fundamental weakness in what came before. Basic Auth's repeated credential exposure led to sessions. Sessions' server-side statefulness led to JWTs. OAuth 2.0 evolved in parallel to solve a different problem entirely: delegated access to third-party resources without sharing passwords. OIDC then layered authentication on top of OAuth's authorization framework. And passkeys finally remove the shared secret that made every password-based approach vulnerable to phishing and data breaches.
+
+Understanding this progression means you can make informed architectural decisions about authentication rather than blindly following whatever tutorial you find. The right choice depends on your specific requirements: who your users are, what threats you face, and what trade-offs you are willing to accept.

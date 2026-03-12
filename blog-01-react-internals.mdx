@@ -1,0 +1,111 @@
+# How React Actually Works Under the Hood
+
+Most React developers write JSX, use hooks, and never think about what happens between their code and the pixels on screen. But understanding the internals turns you from someone who uses React into someone who truly gets it. This post walks through the entire pipeline, from JSX to DOM updates.
+
+## JSX is Not HTML
+
+The first thing to understand is that JSX is syntactic sugar. When you write `<h1>Hello</h1>`, the compiler transforms it into a function call. In the classic transform, this was `React.createElement("h1", null, "Hello")`. Since React 17, the new JSX transform compiles to `_jsx("h1", { children: "Hello" })` imported automatically from `react/jsx-runtime`, so you no longer need `import React` at the top of every file. Either way, the result is the same: a plain JavaScript object called a **React Element**:
+
+```js
+{
+  type: "h1",
+  props: { children: "Hello" },
+  key: null,
+  ref: null,
+  $$typeof: Symbol(react.element)
+}
+```
+
+That's it. No magic. A React Element is just a lightweight description of what you want on screen. Your component functions return trees of these objects.
+
+The `$$typeof` field is a security feature worth mentioning. It uses a JavaScript Symbol, which cannot be created from JSON. This means if an attacker injects JSON into your app (say through a database field that gets rendered), React will reject it because `Symbol(react.element)` can't be faked through serialized data. Simple but effective XSS prevention.
+
+## The Reconciler and Renderer: A Clean Separation
+
+React has two major pieces that work together but are separate concerns.
+
+The **reconciler** is the brain. It walks the component tree, calls your functions, manages state, diffs old elements against new ones, and builds a list of changes that need to happen.
+
+The **renderer** is the hands. It takes those changes and applies them to whatever platform you're targeting. `react-dom` applies them to the browser DOM. `react-native` applies them to native mobile views. `react-three-fiber` applies them to a WebGL scene.
+
+The reconciler never imports the renderer directly. Instead, the renderer creates the reconciler and injects its own platform-specific methods into it. This is textbook **dependency injection** and **inversion of control**. The reconciler just calls `renderer.createNode()` without knowing whether that creates a `<div>` or an iOS `UIView`.
+
+This is also why `react` and `react-dom` are separate packages. The `react` package is a thin, universal API layer (createElement, useState, useEffect). The reconciler is bundled with the renderer inside `react-dom` because they need to be version-matched. The reconciler and renderer ship as a pre-wired pair.
+
+## Fiber: Why React Can Pause
+
+Before React 16, the reconciler used recursive function calls to walk the component tree. Once it started diffing 10,000 nodes, it could not stop until it finished, because you cannot pause a JavaScript call stack. The browser froze.
+
+Fiber (React 16+) replaced recursion with a **linked list of objects**. Each Fiber node is a plain object with pointers to its child, sibling, and parent:
+
+```
+        App
+         |
+         v (child)
+        div
+         |
+         v (child)
+        h1  --sibling-->  p  --sibling-->  Child
+                                              |
+                                              v (child)
+                                            span
+```
+
+React walks this tree using depth-first traversal: go down to child, if no child go right to sibling, if no sibling go up to parent and check its sibling. At each step, React processes one Fiber node and then checks: does the browser need the thread back? If yes, it yields. If no, it continues.
+
+This works because the traversal state is stored in a variable (`currentFiber`), not on the call stack. Pausing just means stopping the loop. Resuming means reading the variable and continuing. Recursion stores its position implicitly on the call stack, which JavaScript gives you no API to freeze and resume.
+
+## Two Phases: Render and Commit
+
+Fiber splits work into two distinct phases.
+
+The **render phase** is where React walks the Fiber tree, calls your component functions, and figures out what changed. This phase is interruptible. React can pause, yield to the browser, and come back. No side effects should happen here.
+
+The **commit phase** is where React takes the computed list of changes and applies them to the actual DOM. This phase is synchronous and cannot be interrupted, because partially applied DOM updates would result in a broken UI.
+
+React also uses **double buffering**. It maintains two Fiber trees: the "current" tree (what's on screen) and the "work-in-progress" tree (what's being built). When the commit phase finishes, React simply swaps the pointer so the WIP tree becomes the current tree. This is the same technique used in video game rendering to prevent screen tearing.
+
+## Hooks: Linked Lists on Fiber Nodes
+
+Hooks are not standalone features. They are tightly coupled to Fiber nodes.
+
+Each Fiber node has a `memoizedState` property that holds a **linked list of hook objects**, one for each hook call in your component. When React is about to call your component function, it sets a global pointer to the current Fiber node. When your function calls `useState`, that call reads from this global pointer.
+
+```
+Profile FiberNode.memoizedState:
+  Hook 0 (useState: "Rosh") --> Hook 1 (useState: 25) --> Hook 2 (useEffect) --> null
+```
+
+This is why hooks must be called in the same order every render. React identifies hooks by their position in the linked list, not by any name or key. If you skip a hook call conditionally, every subsequent hook reads from the wrong position.
+
+**useState on mount** creates a new hook object, stores the initial value, and appends it to the linked list. **useState on update** ignores the initial value entirely, walks to the correct position in the existing list, and returns whatever value is stored there. The setter function (like `setCount`) queues an update on that specific hook and tells React to re-render the component.
+
+**useEffect** does not run during rendering. During the render phase, React just registers the callback and its dependency array on the hook object. After the commit phase, after the browser has painted, React runs the effect callbacks. This is why useEffect runs after paint, not during rendering. The cleanup function (returned from the callback) gets stored on the hook object and runs before the next effect execution or on unmount.
+
+## The Event System: One Listener to Rule Them All
+
+When you write `onClick` on a JSX element, React does not attach a click listener to that DOM node. Instead, React attaches **one single listener per event type** to the root container element.
+
+When you click a deeply nested `<span>`, the native browser event bubbles up to the root. React's listener catches it there. React then looks at `event.target`, finds the corresponding Fiber node, and walks up the Fiber tree collecting every handler it finds (span's onClick, then button's onClick, then div's onClick). It executes them in order, simulating the bubbling behavior internally.
+
+This design means even an app with 500 clickable elements has just one click listener on the root node. It also means React's event system works consistently across browsers and handles edge cases like events from portals correctly (a portal's event still bubbles through the React component tree, not the DOM tree).
+
+## React Server Components: Splitting the Render
+
+The latest major architectural addition is React Server Components (RSC). The idea is that some components only need to run on the server: they fetch data, format it, and produce static output. There is no reason to ship their code to the browser.
+
+With RSC, the server renders server components into a streamable format called the RSC payload. The client receives this payload and stitches it together with interactive client components. The result is smaller client bundles because server component code never reaches the browser.
+
+## The Full Picture
+
+The pipeline from your code to pixels:
+
+1. The JSX transform compiles JSX into function calls that produce React Element objects (plain JS objects)
+3. The reconciler processes these elements using Fiber nodes (linked list, DFS, interruptible)
+4. Hooks are linked lists stored on Fiber nodes, identified by call order
+5. The render phase diffs old vs new, building a list of changes
+6. The commit phase applies changes to the DOM synchronously
+7. Effects run after paint
+8. Events are delegated to a single root listener and dispatched through the Fiber tree
+
+Every piece has a clear engineering reason behind it. Fiber exists because recursion can't pause. Hooks use linked lists because it's the simplest stateful structure without keys. Events delegate because one listener scales better than thousands. Understanding these decisions makes you a fundamentally better React developer.

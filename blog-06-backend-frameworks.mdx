@@ -1,0 +1,105 @@
+# Choosing a Backend Framework: Express vs NestJS vs FastAPI vs Go vs Django vs .NET
+
+Backend frameworks exist on a spectrum from "you decide everything" to "the framework decides for you." Neither end is better. The right choice depends on your team size, project lifespan, and what trade-offs you are willing to accept. This guide compares seven popular frameworks across the dimensions that actually matter for production software.
+
+## The Freedom vs Structure Spectrum
+
+```
+Maximum freedom                                Maximum structure
+Go stdlib -> Express -> Flask -> FastAPI -> NestJS -> Django -> .NET
+```
+
+On the left, you pick your own folder structure, database library, validation approach, and architectural patterns. More power, more decisions, more ways for a team to disagree. On the right, the framework prescribes how you organize code, which ORM to use, and what patterns to follow. Less decision fatigue, less flexibility.
+
+## Routing: How URLs Map to Functions
+
+Every framework connects URLs to handler functions, but the mechanism differs significantly.
+
+Express and Flask use loose, function-based routing. You define routes one at a time, anywhere in your code. This is easy to start with but can scatter route definitions across many files as the app grows.
+
+NestJS, Django, and .NET use controller-based routing with decorators or class-based views. Routes are organized by resource (UserController, OrderController), and the framework enforces this grouping. A new developer joining the team can immediately find where request handling lives.
+
+Go sits in a unique position. The standard library provides basic routing, but most teams add a third-party router like Chi or Gin. You get full control at the cost of assembling the pieces yourself.
+
+## Middleware: The Chain of Responsibility
+
+Middleware is code that runs between a request arriving and the route handler executing. Authentication checks, logging, CORS headers, rate limiting, and request parsing all happen in middleware.
+
+Express implements middleware as an array of functions called sequentially. Each function receives `(req, res, next)` and decides whether to call `next()` to continue the chain or short-circuit with a response. This is the Chain of Responsibility design pattern. Internally, Express iterates through the array using a closure-based index, calling each function in order.
+
+NestJS builds on Express but adds Guards (for authorization), Interceptors (for transforming responses), Pipes (for validation), and Filters (for exception handling). These are specialized middleware types with clear responsibilities, enforced by the framework.
+
+FastAPI uses `Depends()` for dependency injection that serves a similar purpose. A route can declare dependencies that are resolved before the handler runs. FastAPI's generator-based dependencies (using `yield`) provide clean setup and teardown, similar to middleware but with explicit resource lifecycle management.
+
+Django uses a class-based middleware system where each middleware class defines hooks for request processing, response processing, and exception handling.
+
+## Dependency Injection
+
+Dependency injection is declaring "I need X" and letting something else provide it. This decouples components and makes testing straightforward because you can inject mock implementations.
+
+NestJS has a full DI container identical to Angular's. You declare providers with `@Injectable()`, register them in modules, and the framework constructs and injects them automatically. This is the most complete DI system in the Node.js ecosystem.
+
+FastAPI uses `Depends()` with a function-based approach. A dependency is just a function that returns what you need. FastAPI calls it, resolves any nested dependencies, and passes the result to your route handler. Python's `yield` keyword enables generator-based dependencies where code before `yield` is setup and code after is teardown.
+
+Django and Flask have minimal built-in DI. Most Python projects handle this with module-level imports or manual wiring.
+
+Express has no DI system. You import what you need. This is fine for small projects but leads to tight coupling in large codebases.
+
+Go does not have a DI framework. Most Go developers pass dependencies explicitly through function parameters or struct fields. This is verbose but completely transparent.
+
+## ORMs: Talking to the Database
+
+ORMs map database tables to code objects. The approaches vary significantly.
+
+Prisma (commonly used with Express and NestJS) uses a schema file to define your data model. Running `prisma generate` creates a fully typed client. You write `prisma.user.findMany()` and get back typed objects. The schema-first approach means your database structure is defined in one place, and migrations are generated from schema changes.
+
+Django ORM is built into Django. You define models as Python classes, and the framework handles migrations, queries, and the admin interface automatically. The tightest integration of any framework with its ORM.
+
+SQLAlchemy (used with Flask and FastAPI) is the most powerful Python ORM. It supports both an ORM layer and a lower-level expression language for complex queries. More flexible but with a steeper learning curve.
+
+TypeORM (used with NestJS) uses decorators to define entities. It supports both Active Record and Data Mapper patterns.
+
+The N+1 query problem affects all ORMs. When you load a list of users and each user has orders, lazy loading triggers a separate query for each user's orders: 1 query for users + N queries for orders. The fix is eager loading, where you tell the ORM to load relationships upfront using `JOIN` or `IN` clauses.
+
+## Authentication Patterns
+
+The four main patterns progress from simple to complex: sessions, JWTs, OAuth 2.0, and API keys.
+
+Django provides a complete auth system out of the box, including user models, password hashing, sessions, permissions, and login views. .NET's ASP.NET Identity offers similar completeness. NestJS has official Passport.js integration with Guards for route protection. FastAPI and Flask require manual wiring with libraries. Express gives you maximum flexibility and maximum responsibility. Go developers typically implement auth from scratch.
+
+```
+Most built-in auth                              Build it yourself
+Django -> .NET -> NestJS -> FastAPI -> Flask -> Express -> Go
+```
+
+Regardless of framework, the universal practices are: hash passwords with bcrypt or argon2, use HTTPS everywhere, implement short-lived access tokens with refresh tokens, store tokens in httpOnly cookies rather than localStorage, and validate every request.
+
+## Deployment
+
+Deployment progresses through levels of abstraction.
+
+The simplest level is running a process on a server with a process manager (PM2 for Node.js, systemd for anything, Gunicorn for Python). Add a reverse proxy (Nginx) to handle HTTPS, static files, and load balancing.
+
+Docker containers package your app with its entire environment. Go has a massive advantage here because it compiles to a single binary with no runtime dependencies. A Go Docker image can be 10-15MB. Node and Python images start at 200MB+.
+
+Kubernetes orchestrates multiple containers with automatic scaling, rolling updates, and self-healing. Platform-as-a-Service options like Railway or Render abstract away infrastructure entirely. Serverless (AWS Lambda) runs individual functions on demand with no persistent server.
+
+Go has the fastest cold starts for serverless. NestJS and Django have the slowest because they load large frameworks on startup.
+
+## When to Choose What
+
+**Express** when you want maximum flexibility, are building a small to medium API, and your team will enforce their own structure.
+
+**NestJS** when building a large TypeScript backend with a team, when you want enforced architecture, or when coming from Angular (identical patterns).
+
+**FastAPI** when building ML/AI backends, when you want automatic API documentation, or when your team knows Python.
+
+**Django** for rapid prototyping that might become production, content-heavy sites, or when you want everything pre-decided including an admin panel.
+
+**Flask** for small Python microservices or simple APIs with few endpoints.
+
+**.NET** for enterprise environments, especially within the Microsoft ecosystem, with large teams and strict coding standards.
+
+**Go** for performance-critical services, lightweight microservices, infrastructure tooling, or when you want minimal dependencies and tiny deployment sizes.
+
+The key trade-off: "easy to start" and "easy at scale" are inversely correlated. Express is a blank canvas, freeing at first and chaotic later. NestJS is rigid at first and organized later. Choose based on where you expect the project to be in two years, not where it is today.

@@ -1,0 +1,85 @@
+# How Node.js Handles Thousands of Connections on a Single Thread
+
+Node.js runs JavaScript on one thread, yet it routinely handles tens of thousands of simultaneous connections. This is not magic. It is a carefully designed system built on operating system primitives that most developers never see. Understanding the full stack, from hardware interrupts to your callback function, changes how you think about server performance.
+
+## The Misconception
+
+The common explanation is "Node.js is non-blocking and asynchronous." This is true but surface-level. It does not explain the mechanism. How does one thread actually handle multiple connections without one blocking the others? The answer lives in the operating system.
+
+## The Operating System Layer: epoll
+
+When your Node.js server accepts a TCP connection, the OS assigns it a **file descriptor**, which is just an integer that identifies that connection. If you have 10,000 connections, you have 10,000 file descriptors.
+
+Older systems used `select()` or `poll()` system calls that literally looped through every file descriptor checking "has data arrived on this one?" This polling approach degraded linearly with connection count.
+
+Linux solved this with `epoll`, an interrupt-driven notification system. Your process tells the kernel: "I have these 10,000 open TCP sockets. Wake me up when any of them has data ready to read." Then your process **blocks**. It is not checking. It is not looping. It is suspended, consuming zero CPU.
+
+When a network packet arrives on one of those sockets, the **network card** triggers a hardware interrupt. The kernel handles the interrupt, copies data into a socket buffer, and then wakes up your process: "socket #247 has data." The event loop picks it up and calls your callback.
+
+The chain from packet to callback:
+
+```
+Network packet arrives at NIC (network card)
+  -> Hardware interrupt fires
+    -> Kernel handles interrupt, copies data to socket buffer
+      -> epoll wakes up your process
+        -> Event loop calls your callback
+          -> Your JavaScript code runs
+```
+
+Nobody is checking. At every level, it is interrupt and notification based. This is why a single Node.js process can handle so many connections without burning CPU. It is asleep most of the time, only waking when there is actual data to process.
+
+## The Event Loop: What Your Process Actually Does
+
+Your Node.js server is one process, one main thread. It runs a loop. Simplified:
+
+```
+while (true) {
+  // 1. Run any ready JavaScript callbacks (timers, I/O callbacks)
+  // 2. Run microtasks (Promise.then, queueMicrotask)
+  // 3. Check: is there pending I/O or timers?
+  //    If NO -> exit the process (nothing left to do)
+  //    If YES -> call epoll_wait() -> BLOCKS HERE until something happens
+  // 4. Kernel wakes us up -> loop back to step 1
+}
+```
+
+The key is step 3. When there is no JavaScript to execute, the process calls `epoll_wait()`. This is a blocking system call. The process is technically running (it exists, it has memory, it has open sockets), but it is parked inside a kernel call waiting for a notification, consuming zero CPU time.
+
+The moment data arrives, the kernel returns from `epoll_wait()`, the event loop picks up the work, runs your JavaScript, finishes all pending callbacks and microtasks, and goes back to `epoll_wait()` again.
+
+## libuv: The Abstraction Layer
+
+Node.js does not call `epoll` directly. It uses **libuv**, a C library that abstracts OS-specific I/O mechanisms. On Linux, libuv uses epoll. On macOS, it uses kqueue. On Windows, it uses IOCP. Your JavaScript code works the same regardless.
+
+libuv also manages a **thread pool** (default 4 threads) for operations that do not have async OS APIs. File system operations, DNS lookups, and some crypto operations run on this thread pool because the underlying OS calls for these are blocking. Network I/O does not use the thread pool because it goes through epoll.
+
+This creates an important distinction. Network-bound workloads scale beautifully on Node.js because epoll handles them without threads. File-heavy or CPU-heavy workloads can bottleneck on the thread pool. You can increase the pool size with `UV_THREADPOOL_SIZE`, but the real solution for CPU-heavy work is Worker Threads or moving the computation to a separate service.
+
+## Microtasks vs Macrotasks
+
+The event loop processes tasks in a specific order with microtasks getting priority. After each macrotask (timer callback, I/O callback), Node.js drains the entire microtask queue before moving to the next macrotask.
+
+`process.nextTick` runs before Promise callbacks in the microtask queue. Both run before any I/O callbacks, setTimeout callbacks, or setImmediate callbacks. This ordering matters when you need to ensure something runs before the next I/O cycle versus after it.
+
+## Scaling Beyond One Core
+
+A single Node.js process uses one CPU core. Modern servers have many cores. Node.js provides two mechanisms to use them.
+
+**Clustering** forks multiple copies of your server process. Each child process has its own event loop, its own memory, and shares the same listening port. The OS distributes incoming connections across the children. This is the simplest way to use all cores for a network-heavy service.
+
+**Worker Threads** create additional threads within the same process that share memory. Unlike clustering, worker threads can share data via SharedArrayBuffer and communicate through structured cloning or message passing. These are better for CPU-intensive parallelism within a single request, like image processing or heavy computation.
+
+The distinction mirrors the OS-level difference between processes and threads. Clustering uses processes (isolated memory, fault-tolerant but no sharing). Worker Threads use threads (shared memory, efficient communication but a crash can affect the whole process).
+
+## Connection Pooling: The Database Bottleneck
+
+Even though Node.js handles connections efficiently, databases do not. PostgreSQL dedicates one process per connection. MySQL allocates one thread per connection. Opening a new database connection involves a TCP handshake, authentication, and resource allocation on the database server.
+
+Connection pooling (through libraries or tools like PgBouncer) maintains a fixed set of open connections that get reused. When your code needs to query the database, it borrows a connection from the pool, uses it, and returns it. This prevents the overhead of opening and closing connections on every request and protects the database from being overwhelmed by too many simultaneous connections.
+
+MongoDB handles this differently by multiplexing multiple queries over a single TCP connection, so the per-connection overhead is lower. Serverless environments face particular challenges because each function invocation might try to open its own connection, and the cold-start/warm-down cycle conflicts with long-lived connection pools.
+
+## Why This Matters
+
+Understanding the full stack, from hardware interrupts through epoll through libuv through the event loop to your callback, changes how you reason about Node.js performance. You stop thinking "Node is fast because it is async" and start thinking "Node is efficient because it parks when idle and wakes only when there is real work." The single thread is not a limitation for I/O-bound workloads. It is a feature: no thread synchronization, no locks, no context switching overhead. For CPU-bound work, that is where Worker Threads and clustering fill the gap.

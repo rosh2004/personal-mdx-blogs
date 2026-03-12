@@ -1,0 +1,69 @@
+# From SSH and Grep to OpenTelemetry: How Observability Evolved
+
+Before microservices, debugging meant SSH-ing into a server and running `grep "error" /var/log/myapp.log`. That worked when you had three servers running one application. It falls apart completely when you have 200 containers across 15 services, each restarting every few hours. The entire observability ecosystem exists because modern architecture demanded it.
+
+## The Monolith Era
+
+In the 2000s, most applications were monoliths. One application, one or a few servers, one database. Observability was manual and minimal.
+
+Logging meant files on disk. When something broke, an engineer would SSH into the server and grep through log files. If you had multiple servers, you would SSH into each one and grep separately.
+
+Metrics were basic system-level monitoring. Tools like Nagios checked whether the server was alive, whether CPU exceeded 90%, or whether disk was full, and sent an email alert if thresholds were crossed. Application-level metrics like request latency or error rates were rare.
+
+Tracing did not exist because it was not needed. A request entered one process and everything happened inside that process. If something was slow, you added timestamp logs around function calls or used a profiler.
+
+## What Changed
+
+Google published a paper in 2010 called Dapper that described their internal distributed tracing system. This was one of the first formalizations of tracing requests across services. Jaeger and Zipkin were directly inspired by this paper.
+
+The shift happened in waves. First, companies like Netflix and Twitter split monoliths into microservices. Suddenly SSH and grep did not scale. Centralized logging emerged. Then Docker and Kubernetes made it easy to run hundreds of services, but you could not SSH into a container that might only live for minutes. Logs had to be streamed out, metrics had to be scraped automatically, and tracing became essential because request paths crossed many services.
+
+## The Three Pillars
+
+Modern observability rests on three complementary pillars. Each answers different questions, and the real power comes from connecting them.
+
+**Metrics** are aggregated numerical measurements collected at regular intervals. They tell you something is wrong. Request rate is dropping, error rate is spiking, latency at the 99th percentile has doubled. Metrics are cheap to store and fast to query because they are pre-aggregated numbers, not individual events.
+
+Prometheus is the standard metrics tool. It uses a pull model, scraping a `/metrics` endpoint on each service at regular intervals. Your application exposes counters (things that only go up, like total requests), histograms (distributions, like response time buckets), and gauges (values that go up and down, like active connections). Grafana visualizes these metrics as dashboards and powers alerting rules.
+
+Percentile metrics are critical for understanding real user experience. The p50 (median) hides outliers because half your requests are faster and half are slower. The p95 tells you what 95% of users experience. The p99 catches the tail latency that affects your worst 1% of requests. The mean (average) can be misleading because a few extremely slow requests skew it without reflecting typical experience. SLAs and SLOs are typically defined in terms of percentiles, not averages.
+
+**Logs** help you narrow down what went wrong. They are individual event records with contextual data. The key practice is structured logging: always log as JSON objects with searchable fields, not human-readable strings. A log entry should include a timestamp, service name, severity level, request ID, and relevant business context.
+
+The ELK stack (Elasticsearch, Logstash, Kibana) is the standard log pipeline. Filebeat ships logs from your services to Logstash, which processes and transforms them. Elasticsearch stores and indexes them. Kibana provides the search and visualization interface.
+
+**Traces** show you exactly where the bottleneck is. A trace follows a single request as it crosses multiple services. Each service adds a "span" (a unit of work with a start time and duration). The trace is a tree of spans showing which service called which, how long each step took, and where time was spent.
+
+The waterfall view in a tracing tool is the most valuable debugging tool during incidents. It shows span durations as nested horizontal bars, making it immediately visible which service is slow or which call is failing.
+
+## OpenTelemetry: The Unification
+
+Before OpenTelemetry, each observability backend had its own SDK. Jaeger had its own, Zipkin had its own, Datadog had its own. Switching backends meant rewriting your application instrumentation.
+
+OpenTelemetry solved this by standardizing how telemetry data is created and transported. It provides two pieces.
+
+The **SDK** is the set of libraries you install in your application. It creates spans, records metrics, and formats logs. You instrument your code once with OpenTelemetry, and that instrumentation works regardless of where you send the data.
+
+The **Collector** is a separate program that receives telemetry data from your services and routes it to backends. It is configured via a YAML file with three stages: receivers (how data comes in), processors (sampling, batching, enriching), and exporters (where data goes out). Switching from Jaeger to Datadog means changing the exporter config, not touching your application code.
+
+Jaeger, Zipkin, Datadog, and Grafana Tempo are all backends that store and visualize traces. They are the consumers. OpenTelemetry is the producer and transport layer.
+
+## How They Connect
+
+During an incident, the three pillars work together through a common thread: the trace ID.
+
+Metrics alert you that something is wrong. Error rate spiked at 2:14 PM. Logs help you narrow down the cause. Filter logs by time range and error severity, find the error messages. The trace ID in those log entries links you to the full distributed trace. The waterfall view shows that the payment service is timing out because a downstream database query is taking 8 seconds.
+
+This flow, from alert to log to trace, is the standard debugging workflow in modern distributed systems. The trace ID is what ties all three pillars together into a coherent story.
+
+## Sampling: Managing the Cost
+
+Capturing traces for every request generates enormous amounts of data. Sampling exists primarily to reduce storage costs.
+
+The in-process overhead of creating spans is negligible for most systems. The expensive part is storing and querying all that data in the backend. Adaptive sampling is the practical approach: always capture traces for errored or slow requests (these are the ones you care about during incidents), and randomly sample a percentage of normal requests for baseline visibility.
+
+## Who Owns What
+
+In modern organizations, backend engineers are expected to instrument their code with proper logging, metrics endpoints, and trace context propagation. DevOps or Platform Engineering teams set up and maintain the infrastructure: deploying collectors, configuring Prometheus, managing storage backends, and creating alerting rules.
+
+The trend is toward "you build it, you run it," where the team that writes a service is also responsible for its observability and on-call rotation. Understanding the full observability stack, even the parts you do not deploy yourself, makes you significantly more effective when things go wrong at 3 AM.
